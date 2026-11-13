@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BeatTheBot - Hand + AI Ping Pong</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+  <style>
+    :root{--bg1:#07131d;--bg2:#0e2235;--panel:rgba(17,28,38,.9);--line:rgba(255,255,255,.12);--text:#edf8ff;--muted:#a7c9d6;--green:#72f7c7;--cyan:#57d6ff;--orange:#ffb85c}
+    *{box-sizing:border-box}html,body{margin:0;min-height:100%;font-family:Arial,Helvetica,sans-serif;color:var(--text);background:linear-gradient(135deg,var(--bg1),var(--bg2))}body{display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px}.app{width:min(1200px,100%);display:grid;grid-template-columns:360px 1fr;gap:20px}.sidebar,.arena-wrap{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:0 18px 40px rgba(0,0,0,.25)}.sidebar{padding:22px}h1{margin:0 0 12px;font-size:1.8rem}.subtitle{margin:0 0 18px;color:var(--muted);line-height:1.6;font-size:.94rem}.status-panel{display:grid;gap:12px;margin-bottom:18px}.pill{background:rgba(255,255,255,.03);padding:12px 14px;border-radius:12px;border:1px solid var(--line);font-size:.95rem}.pill strong{display:inline-block;min-width:90px;color:var(--cyan)}.camera-box{position:relative;width:100%;aspect-ratio:4/3;overflow:hidden;border-radius:12px;border:1px solid var(--line);background:#000;margin-bottom:18px}video,.camera-box canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.camera-box canvas{transform:scaleX(-1)}.controls{display:grid;gap:10px}button,input{width:100%;border:1px solid var(--line);border-radius:10px;padding:12px 14px;font-size:.95rem;color:var(--text);background:rgba(255,255,255,.03)}button{cursor:pointer;background:linear-gradient(135deg,var(--cyan),#1fa2ff);color:#04131d;font-weight:bold}.arena-wrap{padding:18px}.scorebar{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:8px 10px 14px;color:var(--muted);flex-wrap:wrap}.score{font-size:2.1rem;font-weight:bold;letter-spacing:.08em}.human{color:var(--green)}.ai{color:var(--orange)}.arena{position:relative;width:100%;aspect-ratio:16/9;border-radius:16px;overflow:hidden;border:1px solid var(--line)}#gameCanvas{position:absolute;inset:0;width:100%;height:100%;display:block;background:radial-gradient(circle at center,rgba(40,130,255,.12),rgba(9,17,30,.9))}@media(max-width:900px){.app{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <h1>BeatTheBot</h1>
+      <p class="subtitle">Human paddle uses MediaPipe hand tracking. TensorFlow.js predicts the incoming ball target for the AI paddle and optionally sends normalized target data to an ESP32 Wi-Fi robotic arm.</p>
+      <div class="status-panel">
+        <div class="pill"><strong>Mode</strong> <span id="modeText">Waiting...</span></div>
+        <div class="pill"><strong>Hand</strong> <span id="handText">No hand detected</span></div>
+        <div class="pill"><strong>AI target</strong> <span id="aiTargetText">0.00</span></div>
+        <div class="pill"><strong>ESP32</strong> <span id="esp32Text">Not connected</span></div>
+      </div>
+      <div class="camera-box"><video id="webcam" autoplay playsinline muted></video><canvas id="handOverlay"></canvas></div>
+      <div class="controls">
+        <button id="startButton">Start Camera &amp; Game</button>
+        <input id="esp32Input" type="url" value="http://192.168.1.50" aria-label="ESP32 URL" />
+        <button id="connectButton">Connect to ESP32</button>
+      </div>
+    </aside>
+    <main class="arena-wrap">
+      <div class="scorebar"><div class="score"><span class="human" id="humanScore">0</span> : <span class="ai" id="aiScore">0</span></div><div>Ball speed: <strong id="speedText">0.00</strong></div><div>Prediction: <strong id="predictionText">0.00</strong></div></div>
+      <div class="arena"><canvas id="gameCanvas" width="960" height="540"></canvas></div>
+    </main>
+  </div>
+  <script type="module">
+    import { FilesetResolver, HandLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs';
+    const $=id=>document.getElementById(id), canvas=$('gameCanvas'),ctx=canvas.getContext('2d'),handCanvas=$('handOverlay'),handCtx=handCanvas.getContext('2d'),video=$('webcam');
+    const W=canvas.width,H=canvas.height,PW=16,PH=110;
+    const state={left:{x:24,y:H/2-PH/2,w:PW,h:PH},right:{x:W-40,y:H/2-PH/2,w:PW,h:PH},ball:{x:W/2,y:H/2,vx:5,vy:3.5,r:10},scores:[0,0],targetY:H/2,landmarker:null,model:null,espUrl:'http://192.168.1.50',espConnected:false,started:false,lastArmSent:0};
+    const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
+    function draw(){ctx.clearRect(0,0,W,H);ctx.fillStyle='rgba(12,18,28,.35)';ctx.fillRect(0,0,W,H);ctx.strokeStyle='rgba(255,255,255,.2)';ctx.setLineDash([12,12]);ctx.beginPath();ctx.moveTo(W/2,0);ctx.lineTo(W/2,H);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#72f7c7';ctx.fillRect(state.left.x,state.left.y,PW,PH);ctx.fillStyle='#ffb85c';ctx.fillRect(state.right.x,state.right.y,PW,PH);ctx.beginPath();ctx.arc(state.ball.x,state.ball.y,state.ball.r,0,Math.PI*2);ctx.fillStyle='#f3fbff';ctx.fill();}
+    function resetBall(direction=1){state.ball.x=W/2;state.ball.y=H/2;state.ball.vx=direction*(4.2+Math.random()*1.8);state.ball.vy=(Math.random()*2-1)*4.5;}
+    function updateBall(){const b=state.ball;b.x+=b.vx;b.y+=b.vy;if(b.y-b.r<=0||b.y+b.r>=H){b.vy*=-1;b.y=clamp(b.y,b.r,H-b.r)}const hit=(p,left)=>left?b.x-b.r<=p.x+p.w&&b.x-b.r>=p.x&&b.y>=p.y&&b.y<=p.y+p.h:b.x+b.r>=p.x&&b.x+b.r<=p.x+p.w&&b.y>=p.y&&b.y<=p.y+p.h;if(hit(state.left,true)){b.x=state.left.x+PW+b.r;b.vx=Math.abs(b.vx)+.2;b.vy+=(b.y-(state.left.y+PH/2))*.12}if(hit(state.right,false)){b.x=state.right.x-b.r;b.vx=-Math.abs(b.vx)-.2;b.vy+=(b.y-(state.right.y+PH/2))*.12}if(b.x<-10){state.scores[1]++;resetBall(1)}if(b.x>W+10){state.scores[0]++;resetBall(-1)}b.vx=clamp(b.vx,-12,12);b.vy=clamp(b.vy,-10,10);$('humanScore').textContent=state.scores[0];$('aiScore').textContent=state.scores[1]}
+    function projectedTargetY(){const b=state.ball;let y=b.y;if(b.vx>0){const t=(state.right.x-b.x)/b.vx;y+=b.vy*Math.max(0,t);const span=H-2*b.r;let z=(y-b.r)%(2*span);if(z<0)z+=2*span;y=b.r+(z<=span?z:2*span-z)}return clamp(y/H,.06,.94)}
+    async function initModel(){if(!window.tf)return null;await tf.ready();const model=tf.sequential({layers:[tf.layers.dense({inputShape:[5],units:20,activation:'relu'}),tf.layers.dense({units:12,activation:'relu'}),tf.layers.dense({units:1,activation:'sigmoid'})]});model.compile({optimizer:tf.train.adam(.01),loss:'meanSquaredError'});const xs=[],ys=[];for(let i=0;i<1000;i++){const x=Math.random(),y=Math.random(),vx=Math.random(),vy=Math.random();xs.push([x,y,vx,vy,Math.hypot(vx,vy)]);ys.push([clamp(y+(vy*.18),.06,.94)])}const xt=tf.tensor2d(xs),yt=tf.tensor2d(ys);await model.fit(xt,yt,{epochs:35,batchSize:64,shuffle:true,verbose:0});xt.dispose();yt.dispose();return model}
+    function predict(){const b=state.ball;const fallback=projectedTargetY();if(!state.model)return fallback;const prediction=tf.tidy(()=>{const input=tf.tensor2d([[b.x/W,b.y/H,clamp(b.vx/12,-1,1),clamp(b.vy/12,-1,1),Math.hypot(b.vx,b.vy)/16]]);return state.model.predict(input).dataSync()[0]});return clamp(prediction*.35+fallback*.65,.06,.94)}
+    function updateAI(){const normalized=predict();state.targetY=normalized*H;$('aiTargetText').textContent=normalized.toFixed(2);const target=state.targetY-PH/2;state.right.y+=clamp(target-state.right.y,-8,8);state.right.y=clamp(state.right.y,8,H-PH-8);$('predictionText').textContent=normalized.toFixed(2);$('speedText').textContent=Math.hypot(state.ball.vx,state.ball.vy).toFixed(2)}
+    async function initCamera(){const vision=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm');state.landmarker=await HandLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:'GPU'},runningMode:'VIDEO',numHands:1});const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});video.srcObject=stream;await video.play();handCanvas.width=video.videoWidth||640;handCanvas.height=video.videoHeight||480;const detect=()=>{if(!state.landmarker)return;const results=state.landmarker.detectForVideo(video,performance.now());handCtx.clearRect(0,0,handCanvas.width,handCanvas.height);const hands=results.landmarks||[];if(hands.length){const points=hands[0],tip=points[8];state.left.y=clamp(tip.y*H-PH/2,8,H-PH-8);$('handText').textContent=`Tracked · y ${Math.round(tip.y*H)}`;handCtx.fillStyle='#72f7c7';handCtx.beginPath();handCtx.arc(tip.x*handCanvas.width,tip.y*handCanvas.height,7,0,Math.PI*2);handCtx.fill()}else $('handText').textContent='No hand detected';requestAnimationFrame(detect)};requestAnimationFrame(detect)}
+    async function connectESP32(){state.espUrl=$('esp32Input').value.trim().replace(/\/$/,'');try{const r=await fetch(`${state.espUrl}/health`,{signal:AbortSignal.timeout(2500)});if(!r.ok)throw Error('health check failed');state.espConnected=true;$('esp32Text').textContent='Connected'}catch(e){state.espConnected=false;$('esp32Text').textContent='Unavailable (check URL/CORS)'}}
+    async function sendArm(){if(!state.espConnected||!state.started)return;const normalized=state.targetY/H;const payload={paddleY:normalized,ballX:state.ball.x/W,ballY:state.ball.y/H,targetAngle:Math.round(20+normalized*140),timestamp:Date.now()};try{await fetch(`${state.espUrl}/arm`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(1000)})}catch(e){state.espConnected=false;$('esp32Text').textContent='Disconnected'}}
+    let last=0;function frame(ts){if(!state.started)return;updateBall();updateAI();draw();if(ts-last>100){last=ts;sendArm()}requestAnimationFrame(frame)}
+    $('startButton').addEventListener('click',async()=>{if(state.started)return;try{$('modeText').textContent='Loading TensorFlow model...';state.model=await initModel();$('modeText').textContent=state.model?'AI ready · starting camera':'Heuristic prediction · starting camera';await initCamera();state.started=true;$('modeText').textContent='Camera and game live';requestAnimationFrame(frame)}catch(e){console.error(e);$('modeText').textContent='Startup failed — use HTTPS/localhost and allow camera'}});
+    $('connectButton').addEventListener('click',connectESP32);resetBall();draw();
+  </script>
+</body>
+</html>
